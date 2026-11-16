@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import '../core/api_service.dart';
 import '../core/app_colors.dart';
 
 enum _QrPage { directory, registration, editor, preview }
 
 class _MemorialRecord {
+  final int id;
   String code;
   String name;
   String alias;
@@ -18,6 +20,7 @@ class _MemorialRecord {
   int relatives;
 
   _MemorialRecord({
+    required this.id,
     required this.code,
     required this.name,
     required this.alias,
@@ -31,6 +34,31 @@ class _MemorialRecord {
     this.incenseEnabled = true,
     this.relatives = 1,
   });
+
+  factory _MemorialRecord.fromJson(Map<String, dynamic> json) {
+    final workflow = '${json['workflow_status'] ?? ''}'.toUpperCase();
+    final status = switch (workflow) {
+      'ACTIVE' => 'Đã gắn bia đồng',
+      'PENDING' => 'Chờ duyệt hồ sơ',
+      'CHANGE_PENDING' => 'Chờ duyệt thay đổi',
+      'DRAFT' => 'Bản nháp',
+      'REJECTED' => 'Đã từ chối',
+      _ => workflow.isEmpty ? 'Bản nháp' : workflow,
+    };
+    return _MemorialRecord(
+      id: _number(json['id']), code: '${json['record_code'] ?? ''}',
+      name: '${json['full_name'] ?? ''}', alias: '${json['dharma_name'] ?? 'Chưa cập nhật'}',
+      plot: '${json['plot_code'] ?? ''}', family: '${json['primary_customer_name'] ?? 'Chưa liên kết thân nhân'}',
+      dates: '${json['date_of_birth'] ?? '—'} – ${json['date_of_death'] ?? '—'}',
+      qrCode: '${json['qr_code'] ?? ''}', status: status,
+      isPublic: json['is_public'] == true || json['is_public'] == 1,
+      guestbookEnabled: json['guestbook_enabled'] == true || json['guestbook_enabled'] == 1,
+      incenseEnabled: json['incense_enabled'] == true || json['incense_enabled'] == 1,
+      relatives: _number(json['member_count']),
+    );
+  }
+
+  static int _number(dynamic value) => value is num ? value.toInt() : int.tryParse('$value') ?? 0;
 }
 
 class HoSoMoQrAdminScreen extends StatefulWidget {
@@ -41,8 +69,9 @@ class HoSoMoQrAdminScreen extends StatefulWidget {
 }
 
 class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
-  final _records = <_MemorialRecord>[
+  List<_MemorialRecord> _records = [
     _MemorialRecord(
+      id: 0,
       code: 'HS-2024-0512',
       name: 'Cụ Ông Nguyễn Văn An',
       alias: 'Nhuận Từ',
@@ -54,6 +83,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       relatives: 3,
     ),
     _MemorialRecord(
+      id: 0,
       code: 'HS-2024-0513',
       name: 'Cụ Bà Trần Thị Mai',
       alias: 'Diệu Tâm',
@@ -65,6 +95,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       relatives: 4,
     ),
     _MemorialRecord(
+      id: 0,
       code: 'HS-2023-0308',
       name: 'Ông Giuse Lê Văn Cường',
       alias: 'Giuse',
@@ -76,6 +107,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       relatives: 2,
     ),
     _MemorialRecord(
+      id: 0,
       code: 'HS-2025-0892',
       name: 'Cụ Ông Hoàng Văn Đức',
       alias: 'Hoàng Tộc',
@@ -88,6 +120,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       relatives: 5,
     ),
     _MemorialRecord(
+      id: 0,
       code: 'HS-2025-0901',
       name: 'Bà Maria Vũ Thị Lan',
       alias: 'Maria',
@@ -100,6 +133,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       relatives: 2,
     ),
     _MemorialRecord(
+      id: 0,
       code: 'HS-2024-0702',
       name: 'Cụ Bà Đặng Thị Nga',
       alias: 'Tịnh Quang',
@@ -127,6 +161,21 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
   final _graveController = TextEditingController();
   final _familyController = TextEditingController();
   final _relativeController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _records = [];
+    _loadRecords();
+  }
+
+  Future<void> _loadRecords() async {
+    try {
+      final response = await ApiService.instance.get('/admin/memorials');
+      final rows = (response['data'] as List? ?? const []).map((item) => _MemorialRecord.fromJson(Map<String, dynamic>.from(item as Map))).toList();
+      if (mounted) setState(() => _records = rows);
+    } catch (error) { if (mounted) _notify(error.toString().replaceFirst('Exception: ', '')); }
+  }
 
   @override
   void dispose() {
@@ -731,7 +780,7 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
     setState(() => _page = _QrPage.editor);
   }
 
-  void _submitNewRecord() {
+  Future<void> _submitNewRecord() async {
     final name = _nameController.text.trim();
     if (name.isEmpty) {
       _notify('Nhập họ tên hương linh trước khi gửi duyệt.');
@@ -741,53 +790,41 @@ class _HoSoMoQrAdminScreenState extends State<HoSoMoQrAdminScreen> {
       _notify('Cần nhập vị trí mộ và thân nhân đại diện trước khi gửi duyệt.');
       return;
     }
-    _insertDraft(status: 'Chờ duyệt hồ sơ');
-    _notify('Đã tạo hồ sơ mẫu và chuyển sang trạng thái chờ duyệt.');
+    await _insertDraft(workflowStatus: 'PENDING');
   }
 
-  void _saveDraft() {
+  Future<void> _saveDraft() async {
     if (_nameController.text.trim().isEmpty) {
       _notify('Nhập họ tên hương linh để lưu bản nháp.');
       return;
     }
-    _insertDraft(status: 'Bản nháp');
-    _notify('Đã lưu hồ sơ nháp trong phiên xem thử.');
+    await _insertDraft(workflowStatus: 'DRAFT');
   }
 
-  void _insertDraft({required String status}) {
-    final suffix = DateTime.now().millisecondsSinceEpoch.toString().substring(8);
-    setState(() {
-      _records.insert(0, _MemorialRecord(
-        code: 'HS-2026-$suffix',
-        name: _nameController.text.trim(),
-        alias: _aliasController.text.trim().isEmpty ? 'Chưa cập nhật pháp danh' : _aliasController.text.trim(),
-        plot: _graveController.text.trim().isEmpty ? 'Chưa liên kết vị trí' : _graveController.text.trim(),
-        family: _familyController.text.trim().isEmpty ? 'Chưa liên kết thân nhân' : _familyController.text.trim(),
-        dates: 'Chờ bổ sung ngày sinh / ngày mất',
-        qrCode: 'QR-PENDING-$suffix',
-        status: status,
-        isPublic: _newIsPublic,
-        guestbookEnabled: _newGuestbookEnabled,
-        incenseEnabled: _newIncenseEnabled,
-        relatives: _relativeController.text.trim().isEmpty ? 1 : 2,
-      ));
-      _page = _QrPage.directory;
-      _filter = 'Tất cả';
-      _query = '';
-      _search.clear();
-    });
+  Future<void> _insertDraft({required String workflowStatus}) async {
+    try {
+      await ApiService.instance.post('/admin/memorials', {
+        'plotCode': _graveController.text.trim(), 'fullName': _nameController.text.trim(),
+        'dharmaName': _aliasController.text.trim(), 'workflowStatus': workflowStatus,
+        'isPublic': _newIsPublic, 'guestbookEnabled': _newGuestbookEnabled,
+        'incenseEnabled': _newIncenseEnabled,
+      });
+      if (!mounted) return;
+      setState(() { _page = _QrPage.directory; _filter = 'Tất cả'; _query = ''; _search.clear(); });
+      await _loadRecords();
+      if (mounted) _notify(workflowStatus == 'DRAFT' ? 'Đã lưu bản nháp.' : 'Đã tạo hồ sơ và gửi duyệt.');
+    } catch (error) { if (mounted) _notify(error.toString().replaceFirst('Exception: ', '')); }
   }
 
-  void _saveEditedRecord() {
+  Future<void> _saveEditedRecord() async {
     final record = _active!;
-    setState(() {
-      if (_nameController.text.trim().isNotEmpty) record.name = _nameController.text.trim();
-      if (_aliasController.text.trim().isNotEmpty) record.alias = _aliasController.text.trim();
-      if (_graveController.text.trim().isNotEmpty) record.plot = _graveController.text.trim();
-      if (_familyController.text.trim().isNotEmpty) record.family = _familyController.text.trim();
-      record.status = 'Chờ duyệt thay đổi';
-    });
-    _notify('Đã lưu bản chỉnh sửa mẫu. Cần quản lý duyệt trước khi công khai.');
+    if (record.id <= 0) return;
+    try {
+      await ApiService.instance.post('/admin/memorials/${record.id}/settings', {'isPublic': record.isPublic, 'guestbookEnabled': record.guestbookEnabled, 'incenseEnabled': record.incenseEnabled});
+      if (!mounted) return;
+      await _loadRecords();
+      _notify('Đã lưu cấu hình hiển thị hồ sơ.');
+    } catch (error) { if (mounted) _notify(error.toString().replaceFirst('Exception: ', '')); }
   }
 
   void _backToDirectory() => setState(() => _page = _QrPage.directory);

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import '../core/api_service.dart';
 import '../core/app_colors.dart';
 
 enum _FamilyPage { directory, genealogy, ekyc, reminders }
 
 class _FamilyRecord {
+  final int id;
   final String code;
   final String name;
   final String initials;
@@ -16,6 +18,7 @@ class _FamilyRecord {
   final bool verified;
 
   const _FamilyRecord({
+    required this.id,
     required this.code,
     required this.name,
     required this.initials,
@@ -27,6 +30,23 @@ class _FamilyRecord {
     required this.plots,
     required this.verified,
   });
+
+  factory _FamilyRecord.fromJson(Map<String, dynamic> json) => _FamilyRecord(
+        id: _int(json['id']),
+        code: '${json['customer_code'] ?? ''}',
+        name: '${json['full_name'] ?? ''}',
+        initials: _initials('${json['full_name'] ?? ''}'),
+        category: (json['is_active'] ?? false) == true ? 'Đã liên kết tài khoản' : 'Chờ liên kết tài khoản',
+        description: 'CCCD: ${json['identity_card'] ?? '—'}',
+        phone: '${json['phone_number'] ?? ''}',
+        email: '${json['email'] ?? 'Chưa cập nhật'}',
+        location: '${json['address'] ?? 'Chưa cập nhật'}',
+        plots: '${json['plot_count'] ?? 0} ô mộ • ${json['plot_codes'] ?? 'Chưa liên kết'}',
+        verified: (json['is_active'] ?? false) == true,
+      );
+
+  static int _int(dynamic value) => value is num ? value.toInt() : int.tryParse('$value') ?? 0;
+  static String _initials(String value) => value.trim().split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(2).map((word) => word[0]).join().toUpperCase();
 }
 
 class DanhBaThanNhanAdminScreen extends StatefulWidget {
@@ -39,68 +59,7 @@ class DanhBaThanNhanAdminScreen extends StatefulWidget {
 
 class _DanhBaThanNhanAdminScreenState
     extends State<DanhBaThanNhanAdminScreen> {
-  static const _records = <_FamilyRecord>[
-    _FamilyRecord(
-      code: 'KH-08921',
-      name: 'Anh Nguyễn Văn An',
-      initials: 'NA',
-      category: 'VIP Kim Cương',
-      description: 'Chủ hộ gia tộc họ Nguyễn (Nam Hà)',
-      phone: '0918.xxx.421',
-      email: 'nguyenvanan.invest@gmail.com',
-      location: 'Quận 1, TP. Hồ Chí Minh',
-      plots: '2 ô mộ • M1-R05-12, M7-GT02',
-      verified: true,
-    ),
-    _FamilyRecord(
-      code: 'KH-08915',
-      name: 'Luật sư Hoàng Minh',
-      initials: 'HM',
-      category: 'VIP Kim Cương',
-      description: 'Đại diện quản lý khu gia tộc Hoàng Tộc',
-      phone: '0903.xxx.112',
-      email: 'hoangminh.law@saigon.vn',
-      location: 'Thành phố Thủ Đức',
-      plots: '1 khu gia tộc • M7-GT02',
-      verified: true,
-    ),
-    _FamilyRecord(
-      code: 'KH-08840',
-      name: 'Bác Đỗ Văn Hùng',
-      initials: 'VH',
-      category: 'VIP Vàng',
-      description: 'Thân nhân hương khói Mộ Đôi Song Thân',
-      phone: '0913.xxx.899',
-      email: 'hung.do.dona@gmail.com',
-      location: 'Biên Hòa, Đồng Nai',
-      plots: '1 mộ đôi • M2-D08-04',
-      verified: true,
-    ),
-    _FamilyRecord(
-      code: 'KH-08732',
-      name: 'Chị Phạm Mỹ Linh',
-      initials: 'ML',
-      category: 'Thân nhân tiêu chuẩn',
-      description: 'Người thừa kế di nguyện mộ chi',
-      phone: '0988.xxx.345',
-      email: 'mylinh.pham@outlook.com',
-      location: 'Bình Thạnh, TP. Hồ Chí Minh',
-      plots: '1 mộ đơn • M4-A12-09',
-      verified: true,
-    ),
-    _FamilyRecord(
-      code: 'KH-08655',
-      name: 'Trần Vũ Lâm',
-      initials: 'TL',
-      category: 'Chờ xác minh',
-      description: 'Đại diện thân nhân • hồ sơ mới cập nhật',
-      phone: '0977.xxx.122',
-      email: 'lam.tran@example.vn',
-      location: 'Long Thành, Đồng Nai',
-      plots: 'M3-G01-04',
-      verified: false,
-    ),
-  ];
+  List<_FamilyRecord> _records = [];
 
   final _searchController = TextEditingController();
   String _filter = 'Tất cả';
@@ -111,7 +70,15 @@ class _DanhBaThanNhanAdminScreenState
   @override
   void initState() {
     super.initState();
-    _selected = _records.first;
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final response = await ApiService.instance.get('/admin/families');
+      final rows = (response['data'] as List? ?? const []).map((item) => _FamilyRecord.fromJson(Map<String, dynamic>.from(item as Map))).toList();
+      if (mounted) setState(() { _records = rows; if (rows.isNotEmpty) _selected = rows.first; });
+    } catch (error) { if (mounted) _showNotice(error.toString().replaceFirst('Exception: ', '')); }
   }
 
   @override
@@ -356,7 +323,7 @@ class _DanhBaThanNhanAdminScreenState
             Row(children: [
               Expanded(
                   child: Text(
-                      'ĐANG HIỂN THỊ  ${_visibleRecords.length} / ${_records.length} hồ sơ mẫu  •  Khuôn viên: Tất cả phân khu M1–M11',
+                      'ĐANG HIỂN THỊ  ${_visibleRecords.length} / ${_records.length} hồ sơ  •  Khuôn viên: Tất cả phân khu',
                       style: const TextStyle(
                           color: AppColors.muted,
                           fontSize: 10,
@@ -702,20 +669,29 @@ class _DanhBaThanNhanAdminScreenState
         builder: (context) {
           final nameController = TextEditingController();
           final phoneController = TextEditingController();
+          final identityController = TextEditingController();
+          final addressController = TextEditingController();
           return AlertDialog(
             title: const Text('Thêm hồ sơ thân nhân'),
             content: SizedBox(
               width: 420,
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
+              child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
                 TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Họ và tên')),
                 TextField(controller: phoneController, decoration: const InputDecoration(labelText: 'Số điện thoại'), keyboardType: TextInputType.phone),
-                const SizedBox(height: 8),
-                const Text('Biểu mẫu giao diện; cần kết nối API để lưu hồ sơ.', style: TextStyle(color: AppColors.muted, fontSize: 11)),
-              ]),
+                TextField(controller: identityController, decoration: const InputDecoration(labelText: 'CCCD / hộ chiếu')),
+                TextField(controller: addressController, decoration: const InputDecoration(labelText: 'Địa chỉ (không bắt buộc)')),
+              ])),
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(context), child: const Text('Hủy')),
-              FilledButton(onPressed: () { Navigator.pop(context); _showNotice('Đã nhận thông tin ${nameController.text.isEmpty ? 'thân nhân mới' : nameController.text} trong bản xem thử.'); }, child: const Text('Tiếp tục')),
+              FilledButton(onPressed: () async {
+                try {
+                  await ApiService.instance.post('/admin/families', {'fullName': nameController.text.trim(), 'phone': phoneController.text.trim(), 'identityCard': identityController.text.trim(), 'address': addressController.text.trim()});
+                  if (context.mounted) Navigator.pop(context);
+                  await _load();
+                  if (mounted) _showNotice('Đã tạo hồ sơ thân nhân.');
+                } catch (error) { if (mounted) _showNotice(error.toString().replaceFirst('Exception: ', '')); }
+              }, child: const Text('Lưu hồ sơ')),
             ],
           );
         },

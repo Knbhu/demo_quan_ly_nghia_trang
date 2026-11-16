@@ -1,14 +1,41 @@
 import 'package:flutter/material.dart';
 
+import '../core/api_service.dart';
 import '../core/app_colors.dart';
 
 enum HopDongTab { tatCa, duyet, traGop, quaHan, hoanTat }
 
 class _HopDongItem {
-  final String code, name, plot, kind, status, date;
+  final int id;
+  final String code, name, plot, kind, status, date, phone;
   final int total, paid, installment;
-  const _HopDongItem(this.code, this.name, this.plot, this.kind, this.status,
-      this.date, this.total, this.paid, this.installment);
+  const _HopDongItem(this.id, this.code, this.name, this.plot, this.kind,
+      this.status, this.date, this.phone, this.total, this.paid, this.installment);
+
+  factory _HopDongItem.fromJson(Map<String, dynamic> json) {
+    final total = _number(json['total_amount']);
+    final paid = _number(json['amount_paid']);
+    final adminStatus = '${json['admin_status'] ?? ''}'.toUpperCase();
+    final rawStatus = '${json['status'] ?? ''}'.toUpperCase();
+    final installment = _number(json['installment_months']);
+    final status = switch (adminStatus) {
+      'PENDING' => 'Chờ duyệt',
+      'CHANGE_REQUESTED' => 'Yêu cầu bổ sung',
+      'REJECTED' => 'Đã từ chối',
+      _ when total > 0 && paid >= total => 'Đã hoàn tất',
+      _ when installment > 0 && rawStatus == 'ACTIVE' => 'Trả góp đúng hạn',
+      _ => 'Đã duyệt',
+    };
+    return _HopDongItem(
+      _number(json['id']), '${json['contract_code'] ?? ''}',
+      '${json['customer_name'] ?? ''}', '${json['plot_code'] ?? ''}',
+      '${json['plot_type'] ?? ''}', status,
+      '${json['created_at'] ?? ''}'.split('T').first,
+      '${json['customer_phone'] ?? ''}', total, paid, installment,
+    );
+  }
+
+  static int _number(dynamic value) => value is num ? value.round() : num.tryParse('$value')?.round() ?? 0;
   int get remaining => total - paid;
 }
 
@@ -23,14 +50,31 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
   HopDongTab _tab = HopDongTab.tatCa;
   final _search = TextEditingController();
   int _selected = 0;
+  List<_HopDongItem> _items = [];
+  bool _loading = true;
+  String? _error;
 
-  static const _items = <_HopDongItem>[
-    _HopDongItem('HD-2026-0945', 'Nguyễn Hoài An', 'M2-B08-02', 'Mộ Đôi Kim Cương', 'Chờ duyệt', '10/05/2026', 160000000, 48000000, 0),
-    _HopDongItem('HD-2026-0948', 'Trịnh Văn Cường', 'M3-G04-01', 'Mộ Gia Tộc', 'Ưu tiên duyệt', '10/05/2026', 450000000, 225000000, 0),
-    _HopDongItem('HD-2026-0812', 'Hoàng Minh', 'M7-GT02', 'Mộ Gia Tộc VIP', 'Trả góp đúng hạn', '15/02/2026', 180000000, 144000000, 12),
-    _HopDongItem('HD-2026-0795', 'Đỗ Văn Hùng', 'M2-R08-04', 'Mộ Đôi Liên Hoa', 'Quá hạn', '27/08/2026', 120000000, 60000000, 4),
-    _HopDongItem('HD-2025-0431', 'Nguyễn Văn An', 'M1-R05-12', 'Mộ Đơn Bạch Yến', 'Đã hoàn tất', '15/11/2025', 75000000, 75000000, 0),
-  ];
+  @override
+  void initState() { super.initState(); _load(); }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final response = await ApiService.instance.get('/admin/contracts');
+      final raw = response['data'] as List? ?? const [];
+      if (!mounted) return;
+      setState(() { _items = raw.map((item) => _HopDongItem.fromJson(Map<String, dynamic>.from(item as Map))).toList(); _loading = false; _selected = 0; });
+    } catch (error) { if (mounted) setState(() { _error = error.toString().replaceFirst('Exception: ', ''); _loading = false; }); }
+  }
+
+  Future<void> _contractAction(_HopDongItem item, String action) async {
+    try {
+      await ApiService.instance.post('/admin/contracts/${item.id}/action', {'action': action});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Đã cập nhật hợp đồng ${item.code}.')));
+      await _load();
+    } catch (error) { if (mounted) _message(error.toString().replaceFirst('Exception: ', '')); }
+  }
 
   @override
   void dispose() {
@@ -69,6 +113,9 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
         children: [
           _heading(),
           const SizedBox(height: 16),
+          if (_loading) const Padding(padding: EdgeInsets.all(36), child: Center(child: CircularProgressIndicator()))
+          else if (_error != null) _errorPanel()
+          else ...[
           _summaryCards(),
           const SizedBox(height: 16),
           _tabBar(),
@@ -81,6 +128,7 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
             _tableLayout(rows, selected),
           const SizedBox(height: 12),
           _notice(),
+          ],
         ],
       ),
     );
@@ -118,11 +166,15 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
       );
 
   Widget _summaryCards() {
+    final total = _items.fold(0, (sum, item) => sum + item.total);
+    final paid = _items.fold(0, (sum, item) => sum + item.paid);
+    final pending = _items.where((item) => item.status == 'Chờ duyệt').length;
+    final overdue = _items.where((item) => item.status == 'Quá hạn').length;
     final cards = <(String, String, String, IconData, Color)>[
-      ('TỔNG GIÁ TRỊ KÝ KẾT', '420.5', 'Tỷ VNĐ • 8.200 hợp đồng', Icons.account_balance_outlined, AppColors.forest),
-      ('TIỀN ĐÃ THU THỰC', '345.8', 'Tỷ VNĐ • Hoàn thành 82.2%', Icons.payments_outlined, const Color(0xFF25836B)),
-      ('CẦN THU THÁNG NÀY', '18.2', 'Tỷ VNĐ • 240 kỳ đến hạn', Icons.event_available_outlined, AppColors.gold),
-      ('HỢP ĐỒNG QUÁ HẠN', '14', 'Hồ sơ • Cần xử lý', Icons.notifications_active_outlined, const Color(0xFFC62828)),
+      ('TỔNG GIÁ TRỊ KÝ KẾT', _money(total), '${_items.length} hợp đồng', Icons.account_balance_outlined, AppColors.forest),
+      ('TIỀN ĐÃ THU THỰC', _money(paid), 'Dữ liệu thanh toán đã ghi nhận', Icons.payments_outlined, const Color(0xFF25836B)),
+      ('CHỜ DUYỆT', '$pending', 'Hồ sơ cần thẩm định', Icons.event_available_outlined, AppColors.gold),
+      ('HỢP ĐỒNG QUÁ HẠN', '$overdue', 'Hồ sơ • Cần xử lý', Icons.notifications_active_outlined, const Color(0xFFC62828)),
     ];
     return LayoutBuilder(builder: (context, constraints) {
       final columns = constraints.maxWidth > 1120 ? 4 : constraints.maxWidth > 650 ? 2 : 1;
@@ -146,12 +198,12 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
   }
 
   Widget _tabBar() {
-    const tabs = <(HopDongTab, String, String)>[
-      (HopDongTab.tatCa, 'Tất cả', '8.200'),
-      (HopDongTab.duyet, 'Duyệt hợp đồng', '6'),
-      (HopDongTab.hoanTat, 'Đã hoàn tất', '6.450'),
-      (HopDongTab.traGop, 'Trả góp đúng hạn', '1.736'),
-      (HopDongTab.quaHan, 'Quá hạn nợ', '14'),
+    final tabs = <(HopDongTab, String, String)>[
+      (HopDongTab.tatCa, 'Tất cả', '${_items.length}'),
+      (HopDongTab.duyet, 'Duyệt hợp đồng', '${_items.where((item) => item.status == 'Chờ duyệt').length}'),
+      (HopDongTab.hoanTat, 'Đã hoàn tất', '${_items.where((item) => item.status == 'Đã hoàn tất').length}'),
+      (HopDongTab.traGop, 'Trả góp đúng hạn', '${_items.where((item) => item.status == 'Trả góp đúng hạn').length}'),
+      (HopDongTab.quaHan, 'Quá hạn nợ', '${_items.where((item) => item.status == 'Quá hạn').length}'),
     ];
     return Card(color: Colors.white, child: Padding(
       padding: const EdgeInsets.all(7),
@@ -219,12 +271,12 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
     const SizedBox(height: 8),
     Wrap(spacing: 8, runSpacing: 8, children: [for (final text in ['CCCD đã đối soát', 'Vị trí mộ đã xác nhận', 'Chứng từ thanh toán', 'Lịch trả góp']) Chip(avatar: const Icon(Icons.check_circle, color: Color(0xFF25836B), size: 17), label: Text(text))]),
     const SizedBox(height: 14),
-    Container(width: double.infinity, padding: const EdgeInsets.all(22), decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.paleBlue)), child: const Column(children: [Icon(Icons.description_outlined, color: AppColors.forest, size: 32), SizedBox(height: 6), Text('BẢN XEM TRƯỚC HỢP ĐỒNG', style: TextStyle(fontWeight: FontWeight.w700, color: AppColors.forest)), Text('Bản hợp đồng điện tử sẽ được tạo sau khi kết nối dữ liệu và xác nhận hồ sơ.', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: AppColors.muted))])),
+    Container(width: double.infinity, padding: const EdgeInsets.all(22), decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.paleBlue)), child: const Column(children: [Icon(Icons.description_outlined, color: AppColors.forest, size: 32), SizedBox(height: 6), Text('HỒ SƠ HỢP ĐỒNG', style: TextStyle(fontWeight: FontWeight.w700, color: AppColors.forest)), Text('Trạng thái hồ sơ và thanh toán đang lấy từ cơ sở dữ liệu.', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: AppColors.muted))])),
     const SizedBox(height: 14),
     Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 8, children: [
-      OutlinedButton.icon(onPressed: () => _message('Đã ghi nhận yêu cầu bổ sung hồ sơ.'), icon: const Icon(Icons.edit_note), label: const Text('Yêu cầu bổ sung')),
-      OutlinedButton.icon(onPressed: () => _message('Đã đánh dấu hồ sơ cần từ chối.'), icon: const Icon(Icons.cancel_outlined), label: const Text('Từ chối hồ sơ')),
-      FilledButton.icon(onPressed: () => _message('Chức năng ký duyệt sẽ hoạt động khi nối API hợp đồng.'), icon: const Icon(Icons.draw_outlined), label: const Text('Phê duyệt & ký số')),
+      OutlinedButton.icon(onPressed: item.status == 'Chờ duyệt' ? () => _contractAction(item, 'REQUEST_CHANGES') : null, icon: const Icon(Icons.edit_note), label: const Text('Yêu cầu bổ sung')),
+      OutlinedButton.icon(onPressed: item.status == 'Chờ duyệt' ? () => _contractAction(item, 'REJECT') : null, icon: const Icon(Icons.cancel_outlined), label: const Text('Từ chối hồ sơ')),
+      FilledButton.icon(onPressed: item.status == 'Chờ duyệt' ? () => _contractAction(item, 'APPROVE') : null, icon: const Icon(Icons.draw_outlined), label: const Text('Phê duyệt')),
     ]),
   ])));
 
@@ -255,7 +307,8 @@ class _HopDongAdminScreenState extends State<HopDongAdminScreen> {
   Widget _count(String text, bool selected) => Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: selected ? Colors.white.withValues(alpha: .2) : AppColors.paleBlue, borderRadius: BorderRadius.circular(10)), child: Text(text, style: TextStyle(fontSize: 9, color: selected ? Colors.white : AppColors.muted)));
   Widget _filterTag(String text) => Container(padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10), decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(8)), child: Text(text, style: const TextStyle(fontSize: 11, color: AppColors.text)));
   Widget _empty() => Card(color: Colors.white, child: const Padding(padding: EdgeInsets.all(26), child: Center(child: Text('Không có hợp đồng phù hợp với bộ lọc.', style: TextStyle(color: AppColors.muted)))));
-  Widget _notice() => Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.paleBlue, borderRadius: BorderRadius.circular(8)), child: const Row(children: [Icon(Icons.info_outline, color: AppColors.forest), SizedBox(width: 8), Expanded(child: Text('Đang dùng dữ liệu mẫu để xem giao diện. Duyệt hợp đồng, ký số và thanh toán cần API quản trị kết nối cơ sở dữ liệu.', style: TextStyle(fontSize: 11, color: AppColors.text)))]));
+  Widget _notice() => Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.paleBlue, borderRadius: BorderRadius.circular(8)), child: const Row(children: [Icon(Icons.info_outline, color: AppColors.forest), SizedBox(width: 8), Expanded(child: Text('Danh sách và trạng thái duyệt được đồng bộ từ cơ sở dữ liệu. Chức năng ký số và xuất tệp sẽ được tích hợp sau.', style: TextStyle(fontSize: 11, color: AppColors.text)))]));
+  Widget _errorPanel() => Card(child: Padding(padding: const EdgeInsets.all(22), child: Column(children: [Text(_error!, style: const TextStyle(color: Colors.red)), const SizedBox(height: 10), OutlinedButton(onPressed: _load, child: const Text('Thử lại'))])));
   String _money(int amount) => '${(amount / 1000000).toStringAsFixed(amount % 1000000 == 0 ? 0 : 1)} triệu ₫';
   void _message(String message) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }

@@ -70,23 +70,7 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
   List<dynamic> _items(String key) {
     final raw = data[key];
     final apiItems = raw is List ? raw : const <dynamic>[];
-    // API có thể mới seed tài khoản admin duy nhất. Vẫn trộn dữ liệu mẫu
-    // còn thiếu để giao diện quản trị hiển thị đủ các khu vực khi demo.
-    if (apiItems.isNotEmpty) {
-      final fallback = _fallbackItems(key);
-      if (fallback.isEmpty) return apiItems;
-      final result = <dynamic>[...apiItems];
-      final existing = apiItems
-          .map((item) => item is Map ? _value(item['username'] ?? item['id'] ?? item['service_code']) : '')
-          .toSet();
-      for (final item in fallback) {
-        final map = item is Map ? Map<String, dynamic>.from(item) : <String, dynamic>{};
-        final identity = _value(map['username'] ?? map['id'] ?? map['service_code']);
-        if (identity.isNotEmpty && !existing.contains(identity)) result.add(item);
-      }
-      return result;
-    }
-    return _fallbackItems(key);
+    return apiItems;
   }
 
   List<dynamic> _fallbackItems(String key) {
@@ -99,7 +83,8 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
         {'full_name': 'Đỗ Bảo Trâm', 'username': 'bao.tram', 'phone': '0938211889', 'role_name': 'KẾ TOÁN', 'is_active': true},
       ];
     }
-    if (key == 'roles') return [
+    if (key == 'roles') {
+      return [
       {'id': 1, 'role_name': 'ADMIN TỐI CAO', 'description': 'Toàn quyền quản trị, cấu hình và kiểm toán hệ thống.'},
       {'id': 2, 'role_name': 'QUẢN LÝ KINH DOANH', 'description': 'Quản lý hợp đồng, khách hàng và bảng giá.'},
       {'id': 3, 'role_name': 'ĐIỀU HÀNH TANG LỄ', 'description': 'Điều phối lịch tang lễ, hỏa táng và nhân sự.'},
@@ -107,7 +92,9 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
       {'id': 5, 'role_name': 'KẾ TOÁN - TÀI CHÍNH', 'description': 'Theo dõi thanh toán, công nợ và đối soát.'},
       {'id': 6, 'role_name': 'AN NINH & ĐIỀU PHỐI', 'description': 'Giám sát an ninh, GPS và xe điện nội khu.'},
     ];
-    if (key == 'services') return [
+    }
+    if (key == 'services') {
+      return [
       {'service_code': 'SP-M1-STD', 'service_name': 'Mộ Đơn Tiêu Chuẩn Sinh Thái', 'price': '75.000.000'},
       {'service_code': 'SP-M2-DBL', 'service_name': 'Mộ Đôi Kim Cương Tâm Điểm', 'price': '160.000.000'},
       {'service_code': 'SP-M3-FAM', 'service_name': 'Khuôn Viên Đại Gia Tộc VIP', 'price': '520.000.000'},
@@ -115,9 +102,78 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
       {'service_code': 'DV-CS-VIP', 'service_name': 'Gói Chăm Sóc Hoa Sen Trắng VIP', 'price': '3.600.000/năm'},
       {'service_code': 'DV-TL-TRONGOI', 'service_name': 'Tang Lễ Trọn Gói An Lạc Viên', 'price': '85.000.000'},
     ];
+    }
     return const [];
   }
   String _value(Object? value) => value?.toString() ?? '';
+
+  Future<void> _showCreateStaffDialog() async {
+    final formKey = GlobalKey<FormState>();
+    final name = TextEditingController();
+    final username = TextEditingController();
+    final phone = TextEditingController();
+    final email = TextEditingController();
+    final password = TextEditingController();
+    var role = 'STAFF';
+    var submitting = false;
+    String? submitError;
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('Tạo tài khoản nhân viên'),
+            content: SizedBox(
+              width: 460,
+              child: Form(
+                key: formKey,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(controller: name, decoration: const InputDecoration(labelText: 'Họ và tên *'), validator: (value) => value == null || value.trim().isEmpty ? 'Vui lòng nhập họ tên.' : null),
+                      TextFormField(controller: username, decoration: const InputDecoration(labelText: 'Username *'), validator: (value) => value == null || value.trim().isEmpty ? 'Vui lòng nhập username.' : null),
+                      TextFormField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Số điện thoại *'), validator: (value) => value == null || value.trim().isEmpty ? 'Vui lòng nhập số điện thoại.' : null),
+                      TextFormField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email (không bắt buộc)')),
+                      DropdownButtonFormField<String>(value: role, decoration: const InputDecoration(labelText: 'Vai trò *'), items: const [DropdownMenuItem(value: 'STAFF', child: Text('Nhân viên')), DropdownMenuItem(value: 'WORKER', child: Text('Nhân viên chăm sóc')), DropdownMenuItem(value: 'ADMIN', child: Text('Quản trị viên'))], onChanged: submitting ? null : (value) => setDialogState(() => role = value ?? 'STAFF')),
+                      TextFormField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'Mật khẩu *', helperText: 'Ít nhất 8 ký tự.'), validator: (value) => value == null || value.length < 8 ? 'Mật khẩu cần ít nhất 8 ký tự.' : null),
+                      if (submitError != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(submitError!, style: TextStyle(color: Theme.of(dialogContext).colorScheme.error))),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: submitting ? null : () => Navigator.pop(dialogContext), child: const Text('Hủy')),
+              FilledButton.icon(
+                onPressed: submitting ? null : () async {
+                  if (!formKey.currentState!.validate()) return;
+                  setDialogState(() { submitting = true; submitError = null; });
+                  try {
+                    await ApiService.instance.post('/admin/users', {
+                      'fullName': name.text.trim(), 'username': username.text.trim(),
+                      'phone': phone.text.trim(), 'email': email.text.trim(),
+                      'password': password.text, 'roleName': role,
+                    });
+                    if (dialogContext.mounted) Navigator.pop(dialogContext);
+                    await _load();
+                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã tạo tài khoản nhân viên.')));
+                  } catch (e) {
+                    setDialogState(() { submitting = false; submitError = e.toString().replaceFirst('Exception: ', ''); });
+                  }
+                },
+                icon: submitting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Icon(Icons.person_add_alt_1),
+                label: Text(submitting ? 'Đang tạo…' : 'Tạo tài khoản'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      name.dispose(); username.dispose(); phone.dispose(); email.dispose(); password.dispose();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -192,7 +248,7 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
         const SizedBox(width: 10),
         OutlinedButton.icon(onPressed: () {}, icon: const Icon(Icons.filter_alt_outlined), label: const Text('Bộ lọc')),
         const SizedBox(width: 8),
-        FilledButton.icon(onPressed: () {}, icon: const Icon(Icons.person_add_alt_1), label: const Text('Tạo tài khoản mới')),
+        FilledButton.icon(onPressed: _showCreateStaffDialog, icon: const Icon(Icons.person_add_alt_1), label: const Text('Tạo tài khoản mới')),
       ]), const SizedBox(height: 16),
       if (staff.isEmpty) _empty('Chưa có tài khoản nhân viên.'),
       ...staff.map((item) {

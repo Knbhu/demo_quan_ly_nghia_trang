@@ -59,9 +59,10 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
     try {
       final result = await ApiService.instance.get('/auth/me');
       final user = Map<String, dynamic>.from(result['user'] as Map);
-      if (mounted)
+      if (mounted) {
         setState(() =>
             _adminName = (user['full_name'] ?? 'Quản trị viên').toString());
+      }
     } catch (_) {
       // Keep a useful fallback when the API is temporarily unavailable.
     }
@@ -174,8 +175,9 @@ class _AdminPortalScreenState extends State<AdminPortalScreen> {
                       Text(_areas[i].$2, style: const TextStyle(fontSize: 12)),
                   onTap: () {
                     setState(() => area = _areas[i].$1);
-                    if (MediaQuery.sizeOf(context).width < 850)
+                    if (MediaQuery.sizeOf(context).width < 850) {
                       Navigator.pop(context);
+                    }
                   },
                 ),
               ),

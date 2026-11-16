@@ -77,6 +77,24 @@ const requireSuperAdmin = asyncRoute(async (req, res, next) => {
     next();
 });
 
+const requireAdmin = (req, res, next) => {
+    if (String(req.user.role || '').toUpperCase() !== 'ADMIN') {
+        return res.status(403).json({ error: 'Chức năng này chỉ dành cho quản trị viên.' });
+    }
+    next();
+};
+
+const writeAdminAudit = async (request, actorUserId, entityType, entityId, actionCode, detail = null) => {
+    await request
+        .input('auditActorUserId', sql.Int, Number(actorUserId))
+        .input('auditEntityType', sql.VarChar(50), entityType)
+        .input('auditEntityId', sql.VarChar(80), String(entityId))
+        .input('auditActionCode', sql.VarChar(50), actionCode)
+        .input('auditDetail', sql.NVarChar(sql.MAX), detail ? JSON.stringify(detail) : null)
+        .query(`INSERT INTO dbo.admin_audit_logs(actor_user_id, entity_type, entity_id, action_code, detail_json)
+                VALUES(@auditActorUserId, @auditEntityType, @auditEntityId, @auditActionCode, @auditDetail)`);
+};
+
 // ----------------------------------------------------
 // 2. NHÓM API AUTH (ĐĂNG KÝ, ĐĂNG NHẬP, LẤY PROFILE)
 // ----------------------------------------------------
@@ -164,21 +182,25 @@ app.post('/api/v1/auth/register', asyncRoute(async (req, res) => {
 }));
 // Đăng nhập
 app.post('/api/v1/auth/login', asyncRoute(async (req, res) => {
-    const { phone, password } = req.body;
+    const identifier = String(req.body.phone || req.body.username || '').trim();
+    const { password } = req.body;
+    if (!identifier || !password) {
+        return res.status(400).json({ error: 'Vui lòng nhập số điện thoại hoặc username và mật khẩu.' });
+    }
     const pool = await poolPromise;
     
     const result = await pool.request()
-        .input('phone', sql.VarChar, phone)
+        .input('identifier', sql.VarChar(100), identifier)
         .query(`
             SELECT u.*, r.role_name 
             FROM users u 
             JOIN roles r ON u.role_id = r.id 
-            WHERE u.phone = @phone
+            WHERE u.phone = @identifier OR u.username = @identifier
         `);
 
     const user = result.recordset[0];
     if (!user || !await bcrypt.compare(password || '', user.password_hash)) {
-        return res.status(401).json({ error: 'Số điện thoại hoặc mật khẩu không đúng.' });
+        return res.status(401).json({ error: 'Số điện thoại, username hoặc mật khẩu không đúng.' });
     }
 
     delete user.password_hash;
@@ -793,7 +815,7 @@ app.get('/api/v1/contracts/customer/:id', auth, asyncRoute(async (req, res) => {
         .input('userId', sql.Int, req.params.id)
         .query(`
             SELECT c.*, p.plot_code, p.plot_type, p.price AS plot_price,
-                p.row_num, p.col_num, z.zone_code, z.zone_name,
+                p.row_num, p.col_num, p.latitude, p.longitude, z.zone_code, z.zone_name,
                 cust.full_name AS customer_name, cust.phone_number AS customer_phone,
                 cust.address AS customer_address,
                 COALESCE(deceased.full_name, c.beneficiary_name) AS beneficiary_display_name,
@@ -856,6 +878,227 @@ app.get('/api/v1/contracts/:id/payments', auth, asyncRoute(async (req, res) => {
     }
 
     res.json({ data: result.recordset });
+}));
+
+// ----------------------------------------------------
+// 5A. NHÓM API QUẢN TRỊ (không gồm phân công nhân sự)
+// ----------------------------------------------------
+
+app.get('/api/v1/admin/dashboard', auth, requireAdmin, asyncRoute(async (_req, res) => {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+        SELECT
+          (SELECT COUNT(*) FROM dbo.contracts) AS contracts_total,
+          (SELECT COUNT(*) FROM dbo.contracts WHERE admin_status = 'PENDING') AS contracts_pending,
+          (SELECT COUNT(*) FROM dbo.contracts WHERE admin_status = 'APPROVED') AS contracts_approved,
+          (SELECT COUNT(*) FROM dbo.customers) AS customers_total,
+          (SELECT COUNT(*) FROM dbo.deceased_profiles WHERE workflow_status IN ('PENDING','CHANGE_PENDING')) AS memorials_pending,
+          (SELECT COUNT(*) FROM dbo.funeral_requests WHERE status IN ('PENDING','CONFIRMED','IN_PROGRESS')) AS funerals_open,
+          (SELECT ISNULL(SUM(amount), 0) FROM dbo.payments) AS payments_collected,
+          (SELECT ISNULL(SUM(total_amount), 0) FROM dbo.contracts) AS contracts_value
+    `);
+    res.json({ data: result.recordset[0] });
+}));
+
+app.get('/api/v1/admin/contracts', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const query = String(req.query.q || '').trim();
+    const status = String(req.query.status || '').trim().toUpperCase();
+    const pool = await poolPromise;
+    const result = await pool.request()
+        .input('query', sql.NVarChar(100), query || null)
+        .input('status', sql.VarChar(20), status || null)
+        .query(`
+          SELECT c.id, c.contract_code, c.total_amount, c.deposit_amount, c.deposit_due,
+            c.payment_type, c.status, c.admin_status, c.admin_note, c.created_at, c.reviewed_at,
+            cust.full_name AS customer_name, cust.phone_number AS customer_phone, cust.identity_card,
+            p.plot_code, p.plot_type, z.zone_code, c.beneficiary_name, c.installment_months,
+            ISNULL((SELECT SUM(pay.amount) FROM dbo.payments pay WHERE pay.contract_id=c.id),0) AS amount_paid
+          FROM dbo.contracts c
+          JOIN dbo.customers cust ON cust.id=c.customer_id
+          JOIN dbo.plots p ON p.id=c.plot_id JOIN dbo.zones z ON z.id=p.zone_id
+          WHERE (@status IS NULL OR c.admin_status=@status)
+            AND (@query IS NULL OR c.contract_code LIKE '%' + @query + '%' OR cust.full_name LIKE '%' + @query + '%'
+              OR cust.identity_card LIKE '%' + @query + '%' OR p.plot_code LIKE '%' + @query + '%')
+          ORDER BY c.created_at DESC`);
+    res.json({ data: result.recordset });
+}));
+
+app.post('/api/v1/admin/contracts/:id/action', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const contractId = Number(req.params.id);
+    const action = String(req.body.action || '').toUpperCase();
+    const note = String(req.body.note || '').trim();
+    if (!Number.isInteger(contractId) || !['APPROVE', 'REJECT', 'REQUEST_CHANGES'].includes(action)) {
+        return res.status(400).json({ error: 'Thao tác hợp đồng không hợp lệ.' });
+    }
+    const pool = await poolPromise;
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
+    try {
+        const found = await transaction.request().input('contractId', sql.Int, contractId).query(
+            `SELECT c.id,c.plot_id,c.admin_status,(SELECT COUNT(*) FROM dbo.payments p WHERE p.contract_id=c.id) AS payment_count
+             FROM dbo.contracts c WITH (UPDLOCK,HOLDLOCK) WHERE c.id=@contractId`);
+        const contract = found.recordset[0];
+        if (!contract) { await transaction.rollback(); return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' }); }
+        if (!['PENDING', 'CHANGE_REQUESTED'].includes(contract.admin_status)) {
+            await transaction.rollback();
+            return res.status(409).json({ error: 'Hợp đồng đã được xử lý, không thể thay đổi trạng thái này.' });
+        }
+        const adminStatus = action === 'APPROVE' ? 'APPROVED' : action === 'REJECT' ? 'REJECTED' : 'CHANGE_REQUESTED';
+        const businessStatus = action === 'APPROVE' ? 'ACTIVE' : action === 'REJECT' ? 'CANCELLED' : 'PENDING';
+        await transaction.request().input('contractId', sql.Int, contractId).input('adminStatus', sql.VarChar(20), adminStatus)
+          .input('businessStatus', sql.VarChar(30), businessStatus).input('note', sql.NVarChar(1000), note || null)
+          .input('reviewedBy', sql.Int, req.user.sub).query(`UPDATE dbo.contracts SET admin_status=@adminStatus,status=@businessStatus,admin_note=@note,reviewed_by=@reviewedBy,reviewed_at=SYSUTCDATETIME() WHERE id=@contractId`);
+        if (action === 'REJECT' && Number(contract.payment_count) === 0) {
+            await transaction.request().input('plotId', sql.Int, contract.plot_id).query("UPDATE dbo.plots SET status='AVAILABLE' WHERE id=@plotId AND status='RESERVED'");
+        }
+        await writeAdminAudit(transaction.request(), req.user.sub, 'CONTRACT', contractId, action, { note });
+        await transaction.commit();
+        res.json({ data: { id: contractId, admin_status: adminStatus, status: businessStatus } });
+    } catch (error) { if (transaction._aborted !== true) await transaction.rollback().catch(() => {}); throw error; }
+}));
+
+app.get('/api/v1/admin/families', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const query = String(req.query.q || '').trim();
+    const pool = await poolPromise;
+    const result = await pool.request().input('query', sql.NVarChar(100), query || null).query(`
+      SELECT c.id, CONCAT('KH-', RIGHT('000000' + CAST(c.id AS VARCHAR(6)), 6)) AS customer_code,
+        c.full_name, c.phone_number, c.identity_card, c.address, u.email, u.is_active,
+        COUNT(DISTINCT con.id) AS contract_count, COUNT(DISTINCT con.plot_id) AS plot_count,
+        STRING_AGG(DISTINCT p.plot_code, ', ') AS plot_codes
+      FROM dbo.customers c LEFT JOIN dbo.users u ON u.id=c.user_id
+      LEFT JOIN dbo.contracts con ON con.customer_id=c.id LEFT JOIN dbo.plots p ON p.id=con.plot_id
+      WHERE @query IS NULL OR c.full_name LIKE '%' + @query + '%' OR c.phone_number LIKE '%' + @query + '%'
+        OR c.identity_card LIKE '%' + @query + '%' OR p.plot_code LIKE '%' + @query + '%'
+      GROUP BY c.id,c.full_name,c.phone_number,c.identity_card,c.address,u.email,u.is_active ORDER BY c.full_name`);
+    res.json({ data: result.recordset });
+}));
+
+app.get('/api/v1/admin/families/:id', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const customerId = Number(req.params.id); if (!Number.isInteger(customerId)) return res.status(400).json({ error: 'Mã thân nhân không hợp lệ.' });
+    const pool = await poolPromise;
+    const result = await pool.request().input('customerId', sql.Int, customerId).query(`
+      SELECT c.*,u.email,u.is_active FROM dbo.customers c LEFT JOIN dbo.users u ON u.id=c.user_id WHERE c.id=@customerId;
+      SELECT con.*,p.plot_code,p.plot_type,z.zone_name FROM dbo.contracts con JOIN dbo.plots p ON p.id=con.plot_id JOIN dbo.zones z ON z.id=p.zone_id WHERE con.customer_id=@customerId ORDER BY con.created_at DESC;
+      SELECT d.id,d.record_code,d.full_name,d.workflow_status,d.qr_code,p.plot_code FROM dbo.memorial_members mm JOIN dbo.deceased_profiles d ON d.id=mm.deceased_id JOIN dbo.plots p ON p.id=d.plot_id WHERE mm.customer_id=@customerId;`);
+    if (!result.recordsets[0][0]) return res.status(404).json({ error: 'Không tìm thấy thân nhân.' });
+    res.json({ data: { profile: result.recordsets[0][0], contracts: result.recordsets[1], memorials: result.recordsets[2] } });
+}));
+
+app.post('/api/v1/admin/families', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const fullName = String(req.body.fullName || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    const identityCard = String(req.body.identityCard || '').trim();
+    const address = String(req.body.address || '').trim();
+    if (!fullName || !phone || !identityCard) {
+        return res.status(400).json({ error: 'Cần họ tên, số điện thoại và CCCD/hộ chiếu.' });
+    }
+    const pool = await poolPromise;
+    const result = await pool.request()
+        .input('fullName', sql.NVarChar(100), fullName)
+        .input('phone', sql.VarChar(20), phone)
+        .input('identityCard', sql.VarChar(20), identityCard)
+        .input('address', sql.NVarChar(sql.MAX), address || null)
+        .query(`INSERT INTO dbo.customers(full_name,phone_number,identity_card,address)
+          OUTPUT INSERTED.id,INSERTED.full_name,INSERTED.phone_number,INSERTED.identity_card,INSERTED.address
+          VALUES(@fullName,@phone,@identityCard,@address)`);
+    await writeAdminAudit(pool.request(), req.user.sub, 'CUSTOMER', result.recordset[0].id, 'CREATE');
+    res.status(201).json({ data: result.recordset[0] });
+}));
+
+app.get('/api/v1/admin/memorials', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const status = String(req.query.status || '').trim().toUpperCase(); const query = String(req.query.q || '').trim();
+    const pool = await poolPromise;
+    const result = await pool.request().input('status', sql.VarChar(30), status || null).input('query', sql.NVarChar(100), query || null).query(`
+      SELECT d.*,p.plot_code,z.zone_code,c.full_name AS primary_customer_name,
+        (SELECT COUNT(*) FROM dbo.memorial_members mm WHERE mm.deceased_id=d.id) AS member_count
+      FROM dbo.deceased_profiles d JOIN dbo.plots p ON p.id=d.plot_id JOIN dbo.zones z ON z.id=p.zone_id
+      LEFT JOIN dbo.contracts con ON con.plot_id=p.id LEFT JOIN dbo.customers c ON c.id=con.customer_id
+      WHERE (@status IS NULL OR d.workflow_status=@status) AND (@query IS NULL OR d.full_name LIKE '%' + @query + '%' OR p.plot_code LIKE '%' + @query + '%' OR d.qr_code LIKE '%' + @query + '%')
+      ORDER BY d.updated_at DESC`);
+    res.json({ data: result.recordset });
+}));
+
+app.post('/api/v1/admin/memorials', auth, requireAdmin, asyncRoute(async (req, res) => {
+    let plotId=Number(req.body.plotId); const plotCode=String(req.body.plotCode || '').trim(); const fullName=String(req.body.fullName || '').trim();
+    const workflowStatus=['DRAFT','PENDING'].includes(String(req.body.workflowStatus || '').toUpperCase()) ? String(req.body.workflowStatus).toUpperCase() : 'PENDING';
+    const pool=await poolPromise;
+    if (!Number.isInteger(plotId) && plotCode) {
+      const plot=await pool.request().input('plotCode',sql.VarChar(50),plotCode).query('SELECT id FROM dbo.plots WHERE plot_code=@plotCode');
+      plotId=Number(plot.recordset[0]?.id);
+    }
+    if (!Number.isInteger(plotId) || !fullName) return res.status(400).json({ error: 'Cần chọn ô mộ hợp lệ và nhập họ tên người quá cố.' });
+    const recordCode=`HS-${Date.now()}`; const qrCode=`QR-${Date.now()}`;
+    const result=await pool.request().input('plotId',sql.Int,plotId).input('fullName',sql.NVarChar(100),fullName).input('dharmaName',sql.NVarChar(100),String(req.body.dharmaName || '').trim() || null)
+      .input('recordCode',sql.VarChar(50),recordCode).input('qrCode',sql.VarChar(100),qrCode).input('workflowStatus',sql.VarChar(30),workflowStatus).input('isPublic',sql.Bit,Boolean(req.body.isPublic)).input('guestbookEnabled',sql.Bit,req.body.guestbookEnabled !== false).input('incenseEnabled',sql.Bit,req.body.incenseEnabled !== false)
+      .query(`INSERT INTO dbo.deceased_profiles(plot_id,full_name,dharma_name,record_code,qr_code,workflow_status,is_public,guestbook_enabled,incense_enabled)
+        OUTPUT INSERTED.* VALUES(@plotId,@fullName,@dharmaName,@recordCode,@qrCode,@workflowStatus,@isPublic,@guestbookEnabled,@incenseEnabled)`);
+    await writeAdminAudit(pool.request(),req.user.sub,'MEMORIAL',result.recordset[0].id,'CREATE',{recordCode});
+    res.status(201).json({ data: result.recordset[0] });
+}));
+
+app.post('/api/v1/admin/memorials/:id/action', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const memorialId=Number(req.params.id); const action=String(req.body.action || '').toUpperCase();
+    const allowed={APPROVE:'ACTIVE',REJECT:'REJECTED',REQUEST_CHANGES:'CHANGE_PENDING'};
+    if (!Number.isInteger(memorialId)||!allowed[action]) return res.status(400).json({ error: 'Thao tác hồ sơ không hợp lệ.' });
+    const pool=await poolPromise; const result=await pool.request().input('id',sql.Int,memorialId).input('status',sql.VarChar(30),allowed[action]).query('UPDATE dbo.deceased_profiles SET workflow_status=@status, updated_at=SYSUTCDATETIME() OUTPUT INSERTED.* WHERE id=@id');
+    if(!result.recordset[0]) return res.status(404).json({error:'Không tìm thấy hồ sơ tưởng niệm.'});
+    await writeAdminAudit(pool.request(),req.user.sub,'MEMORIAL',memorialId,action);
+    res.json({data:result.recordset[0]});
+}));
+
+app.post('/api/v1/admin/memorials/:id/settings', auth, requireAdmin, asyncRoute(async (req, res) => {
+    const memorialId=Number(req.params.id); if(!Number.isInteger(memorialId)) return res.status(400).json({error:'Mã hồ sơ không hợp lệ.'});
+    const pool=await poolPromise; const result=await pool.request().input('id',sql.Int,memorialId).input('isPublic',sql.Bit,Boolean(req.body.isPublic)).input('guestbookEnabled',sql.Bit,Boolean(req.body.guestbookEnabled)).input('incenseEnabled',sql.Bit,Boolean(req.body.incenseEnabled)).query(`UPDATE dbo.deceased_profiles SET is_public=@isPublic,guestbook_enabled=@guestbookEnabled,incense_enabled=@incenseEnabled,updated_at=SYSUTCDATETIME() OUTPUT INSERTED.* WHERE id=@id`);
+    if(!result.recordset[0]) return res.status(404).json({error:'Không tìm thấy hồ sơ tưởng niệm.'});
+    await writeAdminAudit(pool.request(),req.user.sub,'MEMORIAL',memorialId,'UPDATE_SETTINGS'); res.json({data:result.recordset[0]});
+}));
+
+app.get('/api/v1/admin/funerals', auth, requireAdmin, asyncRoute(async (_req,res)=>{
+    const pool=await poolPromise; const result=await pool.request().query(`SELECT f.*,p.plot_code,c.full_name AS customer_name FROM dbo.funeral_requests f LEFT JOIN dbo.plots p ON p.id=f.plot_id LEFT JOIN dbo.customers c ON c.id=f.customer_id ORDER BY f.scheduled_at DESC,f.created_at DESC`); res.json({data:result.recordset});
+}));
+app.post('/api/v1/admin/funerals', auth, requireAdmin, asyncRoute(async (req,res)=>{
+    const deceasedName=String(req.body.deceasedName || '').trim(),contactName=String(req.body.contactName || '').trim(),contactPhone=String(req.body.contactPhone || '').trim();
+    if(!deceasedName||!contactName||!contactPhone) return res.status(400).json({error:'Cần tên người quá cố và thông tin liên hệ.'});
+    const pool=await poolPromise; const code=`TL-${Date.now()}`; const result=await pool.request().input('code',sql.VarChar(50),code).input('deceasedName',sql.NVarChar(100),deceasedName).input('contactName',sql.NVarChar(100),contactName).input('contactPhone',sql.VarChar(20),contactPhone).input('scheduledAt',sql.DateTime2,req.body.scheduledAt ? new Date(req.body.scheduledAt) : null).input('packageName',sql.NVarChar(150),String(req.body.packageName || '').trim() || null).input('note',sql.NVarChar(2000),String(req.body.note || '').trim() || null).query(`INSERT INTO dbo.funeral_requests(request_code,deceased_name,contact_name,contact_phone,scheduled_at,package_name,note) OUTPUT INSERTED.* VALUES(@code,@deceasedName,@contactName,@contactPhone,@scheduledAt,@packageName,@note)`); await writeAdminAudit(pool.request(),req.user.sub,'FUNERAL',result.recordset[0].id,'CREATE');res.status(201).json({data:result.recordset[0]});
+}));
+app.post('/api/v1/admin/funerals/:id/status', auth, requireAdmin, asyncRoute(async (req,res)=>{
+    const id=Number(req.params.id),status=String(req.body.status || '').toUpperCase(); if(!Number.isInteger(id)||!['PENDING','CONFIRMED','IN_PROGRESS','COMPLETED','CANCELLED'].includes(status)) return res.status(400).json({error:'Trạng thái tang lễ không hợp lệ.'}); const pool=await poolPromise; const result=await pool.request().input('id',sql.Int,id).input('status',sql.VarChar(30),status).query('UPDATE dbo.funeral_requests SET status=@status,updated_at=SYSUTCDATETIME() OUTPUT INSERTED.* WHERE id=@id'); if(!result.recordset[0])return res.status(404).json({error:'Không tìm thấy yêu cầu tang lễ.'}); await writeAdminAudit(pool.request(),req.user.sub,'FUNERAL',id,'UPDATE_STATUS',{status});res.json({data:result.recordset[0]});
+}));
+
+app.get('/api/v1/admin/plots/gps', auth, requireAdmin, asyncRoute(async (_req,res)=>{const pool=await poolPromise;const result=await pool.request().query('SELECT p.id,p.plot_code,p.latitude,p.longitude,p.row_num,p.col_num,z.zone_code,z.zone_name FROM dbo.plots p JOIN dbo.zones z ON z.id=p.zone_id ORDER BY z.zone_code,p.row_num,p.col_num');res.json({data:result.recordset});}));
+app.post('/api/v1/admin/plots/:id/gps', auth, requireAdmin, asyncRoute(async (req,res)=>{const id=Number(req.params.id),latitude=Number(req.body.latitude),longitude=Number(req.body.longitude);if(!Number.isInteger(id)||!Number.isFinite(latitude)||!Number.isFinite(longitude)||latitude < -90||latitude>90||longitude < -180||longitude>180)return res.status(400).json({error:'Tọa độ GPS không hợp lệ.'});const pool=await poolPromise;const result=await pool.request().input('id',sql.Int,id).input('latitude',sql.Decimal(10,7),latitude).input('longitude',sql.Decimal(10,7),longitude).query('UPDATE dbo.plots SET latitude=@latitude,longitude=@longitude OUTPUT INSERTED.id,INSERTED.plot_code,INSERTED.latitude,INSERTED.longitude WHERE id=@id');if(!result.recordset[0])return res.status(404).json({error:'Không tìm thấy ô mộ.'});await writeAdminAudit(pool.request(),req.user.sub,'PLOT',id,'UPDATE_GPS');res.json({data:result.recordset[0]});}));
+
+app.post('/api/v1/admin/users', auth, requireSuperAdmin, asyncRoute(async (req, res) => {
+    const fullName=String(req.body.fullName || '').trim(), username=String(req.body.username || '').trim(), phone=String(req.body.phone || '').trim(), password=String(req.body.password || ''), roleName=String(req.body.roleName || '').toUpperCase();
+    if(!fullName||!username||!phone||password.length<8||!['ADMIN','STAFF','WORKER'].includes(roleName)) return res.status(400).json({error:'Thông tin tài khoản nhân viên chưa hợp lệ.'});
+    const pool=await poolPromise; const role=await pool.request().input('roleName',sql.VarChar(50),roleName).query('SELECT id FROM dbo.roles WHERE role_name=@roleName');
+    if(!role.recordset[0]) return res.status(400).json({error:'Vai trò không tồn tại.'});
+    const hash=await bcrypt.hash(password,12); const result=await pool.request().input('roleId',sql.Int,role.recordset[0].id).input('username',sql.VarChar(100),username).input('passwordHash',sql.VarChar(255),hash).input('fullName',sql.NVarChar(100),fullName).input('phone',sql.VarChar(20),phone).input('email',sql.VarChar(100),String(req.body.email || '').trim() || null).query(`INSERT INTO dbo.users(role_id,username,password_hash,full_name,phone,email,is_active) OUTPUT INSERTED.id,INSERTED.username,INSERTED.full_name,INSERTED.phone,INSERTED.email VALUES(@roleId,@username,@passwordHash,@fullName,@phone,@email,1)`);
+    await writeAdminAudit(pool.request(),req.user.sub,'USER',result.recordset[0].id,'CREATE',{roleName}); res.status(201).json({data:result.recordset[0]});
+}));
+
+app.post('/api/v1/admin/services', auth, requireSuperAdmin, asyncRoute(async (req,res)=>{
+    const serviceCode=String(req.body.serviceCode || '').trim().toUpperCase(),serviceName=String(req.body.serviceName || '').trim(),price=Number(req.body.price);
+    if(!serviceCode||!serviceName||!Number.isFinite(price)||price<0)return res.status(400).json({error:'Thông tin dịch vụ chưa hợp lệ.'}); const pool=await poolPromise;
+    const result=await pool.request().input('serviceCode',sql.VarChar(30),serviceCode).input('serviceName',sql.NVarChar(150),serviceName).input('price',sql.Decimal(15,2),price).input('description',sql.NVarChar(sql.MAX),String(req.body.description || '').trim() || null).query('INSERT INTO dbo.services(service_code,service_name,price,description) OUTPUT INSERTED.* VALUES(@serviceCode,@serviceName,@price,@description)');await writeAdminAudit(pool.request(),req.user.sub,'SERVICE',result.recordset[0].id,'CREATE');res.status(201).json({data:result.recordset[0]});
+}));
+
+app.post('/api/v1/admin/roles/:id/permissions', auth, requireSuperAdmin, asyncRoute(async (req,res)=>{
+    const roleId=Number(req.params.id); const permissions=Array.isArray(req.body.permissions) ? req.body.permissions : [];
+    if(!Number.isInteger(roleId)||permissions.length===0||permissions.some(item=>!item||typeof item.code!=='string'||typeof item.allowed!=='boolean')) return res.status(400).json({error:'Danh sách quyền không hợp lệ.'});
+    const pool=await poolPromise; const transaction=new sql.Transaction(pool); await transaction.begin();
+    try {
+        const role=await transaction.request().input('roleId',sql.Int,roleId).query('SELECT id FROM dbo.roles WHERE id=@roleId');
+        if(!role.recordset[0]) { await transaction.rollback(); return res.status(404).json({error:'Không tìm thấy vai trò.'}); }
+        for(const permission of permissions) {
+            const code=permission.code.trim().toUpperCase(); if(!code || code.length>100) { await transaction.rollback(); return res.status(400).json({error:'Mã quyền không hợp lệ.'}); }
+            await transaction.request().input('roleId',sql.Int,roleId).input('code',sql.VarChar(100),code).input('allowed',sql.Bit,permission.allowed).query(`IF EXISTS(SELECT 1 FROM dbo.system_role_permissions WHERE role_id=@roleId AND permission_code=@code)
+                UPDATE dbo.system_role_permissions SET allowed=@allowed WHERE role_id=@roleId AND permission_code=@code
+              ELSE INSERT INTO dbo.system_role_permissions(role_id,permission_code,allowed) VALUES(@roleId,@code,@allowed)`);
+        }
+        await writeAdminAudit(transaction.request(),req.user.sub,'ROLE',roleId,'UPDATE_PERMISSIONS',{count:permissions.length}); await transaction.commit();
+        res.json({data:{role_id:roleId,updated:permissions.length}});
+    } catch(error) { await transaction.rollback().catch(()=>{}); throw error; }
 }));
 
 // ----------------------------------------------------
@@ -1265,6 +1508,11 @@ app.post('/api/v1/care-orders/:id/proof', auth, asyncRoute(async (req, res) => {
 
 app.use((err, req, res, _next) => {
     console.error(err);
+    if (err.number === 208 && req.path.startsWith('/api/v1/admin/')) {
+        return res.status(503).json({
+            error: 'Cơ sở dữ liệu chưa có đủ bảng cho API quản trị. Hãy chạy database/20261102_01_admin_api_modules.sql rồi khởi động lại backend.'
+        });
+    }
     if (err.number === 208 && req.path.startsWith('/api/v1/care-')) {
         return res.status(503).json({
             error: 'Cơ sở dữ liệu chưa có đủ bảng dịch vụ chăm sóc từ xa. Hãy chạy database/bo_sung_cham_soc_tu_xa.sql trong database sala_garden_db rồi khởi động lại backend.'

@@ -283,7 +283,7 @@ class _AdminDonChamSocScreenState extends State<AdminDonChamSocScreen> {
                 width: 42,
                 height: 42,
                 decoration: BoxDecoration(
-                    color: color.withOpacity(.1),
+                    color: color.withValues(alpha: .1),
                     borderRadius: BorderRadius.circular(9)),
                 child: Icon(icon, color: color),
               ),

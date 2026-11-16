@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
+import '../core/api_service.dart';
 import '../core/app_colors.dart';
 
-/// Daily funeral and crematorium operations dashboard, matching the first
-/// approved reference screen. Data is currently sample data until the APIs are
-/// connected.
-class AdminDieuHanhTangLeScreen extends StatelessWidget {
+class AdminDieuHanhTangLeScreen extends StatefulWidget {
   const AdminDieuHanhTangLeScreen({super.key});
+  @override
+  State<AdminDieuHanhTangLeScreen> createState() => _AdminDieuHanhTangLeScreenState();
+}
 
-  static const _events = <_FuneralEvent>[
+class _AdminDieuHanhTangLeScreenState extends State<AdminDieuHanhTangLeScreen> {
+  List<_FuneralEvent> _events = <_FuneralEvent>[
     _FuneralEvent(
       code: 'TL-01',
       time: '07:00 – 09:30',
@@ -74,6 +76,22 @@ class AdminDieuHanhTangLeScreen extends StatelessWidget {
       color: Color(0xFF9EAAA5),
     ),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _events = [];
+    _loadEvents();
+  }
+
+  Future<void> _loadEvents() async {
+    try {
+      final response = await ApiService.instance.get('/admin/funerals');
+      final rows = response['data'] as List? ?? const [];
+      if (!mounted) return;
+      setState(() => _events = rows.map((item) => _FuneralEvent.fromJson(Map<String, dynamic>.from(item as Map))).toList());
+    } catch (error) { if (mounted) _message(context, error.toString().replaceFirst('Exception: ', '')); }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -722,6 +740,26 @@ class _FuneralEvent {
       required this.sideValue,
       required this.sideNote,
       required this.color});
+
+  factory _FuneralEvent.fromJson(Map<String, dynamic> json) {
+    final rawStatus = '${json['status'] ?? 'PENDING'}'.toUpperCase();
+    final status = switch (rawStatus) {
+      'COMPLETED' => 'ĐÃ HOÀN TẤT',
+      'IN_PROGRESS' => 'ĐANG DIỄN RA',
+      'CONFIRMED' => 'ĐÃ XÁC NHẬN',
+      'CANCELLED' => 'ĐÃ HỦY',
+      _ => 'CHỜ XÁC NHẬN',
+    };
+    final time = '${json['scheduled_at'] ?? 'Chưa xếp lịch'}'.replaceFirst('T', ' ');
+    return _FuneralEvent(
+      code: '${json['request_code'] ?? ''}', time: time, status: status,
+      person: '${json['deceased_name'] ?? ''}',
+      detail: '${json['package_name'] ?? 'Chưa chọn gói'} • ${json['plot_code'] ?? 'Chưa liên kết ô mộ'}',
+      note: '${json['note'] ?? 'Chưa có ghi chú'}', sideTitle: 'Trạng thái hồ sơ',
+      sideValue: status, sideNote: 'Liên hệ: ${json['contact_name'] ?? ''}',
+      color: rawStatus == 'IN_PROGRESS' ? AppColors.gold : rawStatus == 'CANCELLED' ? Colors.red : AppColors.forest,
+    );
+  }
 }
 
 class _SurfaceCard extends StatelessWidget {
